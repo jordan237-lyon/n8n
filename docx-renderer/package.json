@@ -1,0 +1,14 @@
+{
+  "name": "n8n-docx-renderer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "docxtemplater": "3.69.3",
+    "express": "5.2.1",
+    "pizzip": "3.2.0"
+  }
+}
