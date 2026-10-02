@@ -5,6 +5,7 @@
 
 # Generated workflow files and output documents
 outputs/
+tmp/
 Untitled-*.n8n
 
 # Node.js dependencies and logs

@@ -26,6 +26,13 @@ def replace_text(paragraph, replacement):
         node.text = ""
 
 
+def replace_text_node(paragraph, original, replacement):
+    matches = [node for node in paragraph.iter(W + "t") if node.text == original]
+    if len(matches) != 1:
+        raise RuntimeError(f"Texte introuvable ou ambigu: {original}")
+    matches[0].text = replacement
+
+
 with TemporaryDirectory(prefix="cv-template-") as temporary:
     temporary_path = Path(temporary)
     with ZipFile(SOURCE) as archive:
@@ -42,6 +49,31 @@ with TemporaryDirectory(prefix="cv-template-") as temporary:
     root = tree.getroot()
     parents = {child: parent for parent in root.iter() for child in parent}
     paragraphs = list(root.iter(W + "p"))
+
+    # The imported source contains a full-page raster layer before the actual
+    # document. It has no text but LibreOffice allocates a dedicated page for
+    # it, so discard that conversion artifact.
+    for paragraph in paragraphs:
+        if not paragraph_text(paragraph).strip() and list(paragraph.iter(W + "drawing")):
+            parents[paragraph].remove(paragraph)
+    paragraphs = list(root.iter(W + "p"))
+
+    # The source was saved as US Letter although the validated CV is A4. The
+    # shorter page makes LibreOffice spill the same content onto extra pages.
+    for page_size in root.iter(W + "pgSz"):
+        page_size.set(W + "w", "11906")
+        page_size.set(W + "h", "16838")
+        page_size.set(W + "orient", "portrait")
+    for page_margins in root.iter(W + "pgMar"):
+        page_margins.set(W + "top", "360")
+        page_margins.set(W + "right", "500")
+        page_margins.set(W + "bottom", "360")
+        page_margins.set(W + "left", "500")
+        page_margins.set(W + "header", "0")
+        page_margins.set(W + "footer", "0")
+    for section in root.iter(W + "sectPr"):
+        for footer_reference in list(section.findall(W + "footerReference")):
+            section.remove(footer_reference)
 
     profile_prefix = "Data Engineer orienté delivery, intervenant"
     exp1_prefixes = [
@@ -81,6 +113,24 @@ with TemporaryDirectory(prefix="cv-template-") as temporary:
     if missing:
         raise RuntimeError(f"Paragraphes introuvables ou ambigus: {missing}")
 
+    experience_headers = {
+        "Devoteam — CDD": "Devoteam",
+        "Sept. 2024 – Déc. 2025": "Oct. 2023 – Sept. 2025",
+        "Data Engineer — Projet IA & Transformation Digitale": "IA / Data Engineer — Projet IA & Transformation Digitale",
+        "Green4All — Conception et industrialisation d’une plateforme Data & IA Green IT.": "Green4All — Outil de recommandation Green IT et Sustainability IT.",
+        "LMT Group — Freelance": "LMT Group",
+        "Oct. 2023 – Juil. 2024": "Sept. 2020 – Août 2023",
+        "Data Engineer / Analytics Engineer": "Data Engineer / ML Engineer",
+        "Plateforme analytique de supervision des incidents et d’aide à la décision pour un Call Center.": "Plateforme Data/ML de supervision et de prédiction des incidents d’un Call Center.",
+    }
+    for original, replacement in experience_headers.items():
+        paragraph = next(
+            paragraph
+            for paragraph in paragraphs
+            if original in paragraph_text(paragraph)
+        )
+        replace_text_node(paragraph, original, replacement)
+
     replace_text(matches[profile_prefix][0], "{{PROFIL}}")
     for index, prefix in enumerate(exp1_prefixes, 1):
         replace_text(matches[prefix][0], f"{{{{EXP1_POINT{index}}}}}")
@@ -90,28 +140,37 @@ with TemporaryDirectory(prefix="cv-template-") as temporary:
         paragraph = matches[prefix][0]
         parents[paragraph].remove(paragraph)
 
-    # The original used a section boundary between the two experiences. Once
-    # the first experience is reduced to six bullets, LibreOffice keeps that
-    # boundary on a new page and leaves half of page 1 empty. Merge both
-    # experiences into the same section so content can flow naturally.
+    exp1_result = next(
+        paragraph
+        for paragraph in root.iter(W + "p")
+        if paragraph_text(paragraph).strip().startswith("Résultat : réduction d’environ 60 %")
+    )
+    parents[exp1_result].remove(exp1_result)
+
+    # Keep both experiences in the same section. Leaving the original section
+    # boundary here forces Word/LibreOffice to add blank space and expands the
+    # generated CV beyond its required two pages.
     lmt_paragraph = next(
         paragraph
         for paragraph in root.iter(W + "p")
-        if paragraph_text(paragraph).strip().startswith("LMT Group — Freelance")
+        if paragraph_text(paragraph).strip().startswith("LMT Group")
     )
     lmt_parent = parents[lmt_paragraph]
     lmt_position = list(lmt_parent).index(lmt_paragraph)
     section_boundary = list(lmt_parent)[lmt_position - 1]
     if section_boundary.tag == W + "p" and list(section_boundary.iter(W + "sectPr")):
         lmt_parent.remove(section_boundary)
-        exp2_environment = next(
-            paragraph
-            for paragraph in root.iter(W + "p")
-            if "Environnement : Python, SQL, PostgreSQL"
-            in paragraph_text(paragraph)
-        )
-        environment_position = list(lmt_parent).index(exp2_environment)
-        lmt_parent.insert(environment_position + 1, section_boundary)
+
+    exp1_environment = next(
+        paragraph for paragraph in root.iter(W + "p")
+        if paragraph_text(paragraph).strip().startswith("Environnement : Python, SQL, Airflow")
+    )
+    exp2_environment = next(
+        paragraph for paragraph in root.iter(W + "p")
+        if "Environnement : Python, SQL, PostgreSQL" in paragraph_text(paragraph)
+    )
+    replace_text(exp1_environment, "Environnement : {{ENV1}}")
+    replace_text(exp2_environment, "Environnement : {{ENV2}}")
 
     # Replace the complete skills block with one dynamic, compact paragraph.
     paragraphs = list(root.iter(W + "p"))
@@ -124,6 +183,16 @@ with TemporaryDirectory(prefix="cv-template-") as temporary:
             parent.remove(paragraph)
 
     tree.write(document_path, encoding="UTF-8", xml_declaration=True)
+
+    styles_path = temporary_path / "word/styles.xml"
+    styles_tree = ET.parse(styles_path)
+    styles_root = styles_tree.getroot()
+    for size_tag in (W + "sz", W + "szCs"):
+        for font_size in styles_root.iter(size_tag):
+            value = font_size.get(W + "val")
+            if value and value.isdigit():
+                font_size.set(W + "val", str(max(16, round(int(value) * 0.9))))
+    styles_tree.write(styles_path, encoding="UTF-8", xml_declaration=True)
 
     with ZipFile(TARGET, "w", ZIP_DEFLATED) as output:
         for file_path in temporary_path.rglob("*"):

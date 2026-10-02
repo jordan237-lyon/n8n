@@ -8,7 +8,7 @@ import Docxtemplater from 'docxtemplater';
 
 const app = express();
 const port = 3000;
-const cvTemplatePath = '/files/templates/CV-template.docx';
+const cvTemplatePath = '/files/templates/CV-template.html';
 const letterTemplatePath = '/files/templates/LM-template.docx';
 
 const requiredFields = [
@@ -25,10 +25,32 @@ const requiredFields = [
   'EXP2_POINT3',
   'EXP2_POINT4',
   'EXP2_POINT5',
-  'EXP2_POINT6',
+  'EXP2_POINT6'
 ];
 
 const requiredLetterFields = ['cover_letter'];
+
+// The template is deliberately dense: content longer than this budget can
+// overflow its fixed two-page layout. The renderer normalizes the text as a
+// final safety net because upstream LLM instructions are not deterministic.
+const cvFieldLimits = {
+  PROFIL: 380,
+  COMPETENCES: 260,
+  EXP1_POINT1: 120,
+  EXP1_POINT2: 120,
+  EXP1_POINT3: 120,
+  EXP1_POINT4: 120,
+  EXP1_POINT5: 120,
+  EXP1_POINT6: 120,
+  ENV1: 100,
+  EXP2_POINT1: 120,
+  EXP2_POINT2: 120,
+  EXP2_POINT3: 120,
+  EXP2_POINT4: 120,
+  EXP2_POINT5: 120,
+  EXP2_POINT6: 120,
+  ENV2: 55,
+};
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -44,6 +66,53 @@ function sanitizeFilename(requestedName, fallbackName) {
       .replace(/-+/g, '-')
       .slice(0, 120) || fallbackName
   );
+}
+
+function shortenAtWord(value, limit) {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+
+  const candidate = normalized.slice(0, limit - 1);
+  const lastSpace = candidate.lastIndexOf(' ');
+  const shortened = lastSpace > candidate.length * 0.7
+    ? candidate.slice(0, lastSpace)
+    : candidate;
+
+  return `${shortened.trim()}…`;
+}
+
+function fitCvContent(data) {
+  return Object.fromEntries(
+    Object.entries(data).map(([field, value]) => [
+      field,
+      cvFieldLimits[field] ? shortenAtWord(value, cvFieldLimits[field]) : value,
+    ]),
+  );
+}
+
+const experienceEnvironments = {
+  ENV1: 'Agile Scrum, Linux, Python, SQL, YAML, Airflow, PostgreSQL, pgvector, Neo4j, FastAPI, Django REST, scikit-learn, Sentence-Transformers, FAISS, BM25, CrossEncoder, RAG, LLM, LangGraph, Mistral/Ollama, Llama 4 Maverick, NVIDIA API, Docker, Kubernetes, GitLab CI/CD',
+  ENV2: 'Agile Scrum, AWS, S3, Python, SQL, JavaScript, Spark, PySpark, Snowpark, Snowflake, dbt, dbt tests, Data Quality, scikit-learn, XGBoost, CSV, XML, JSON, Django REST, Streamlit, Power BI, Docker, GitLab CI, Grafana, Git, Postman, VS Code, Jira, Confluence',
+};
+
+function escapeHtml(value) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function renderHtmlTemplate(templatePath, data) {
+  let html = fs.readFileSync(templatePath, 'utf8');
+  for (const [field, value] of Object.entries(data)) {
+    html = html.replaceAll(`{{${field}}}`, escapeHtml(value));
+  }
+  return Buffer.from(html, 'utf8');
 }
 
 function convertDocxToPdf(docxPath, temporaryDirectory) {
@@ -116,24 +185,32 @@ function renderFromTemplate({
       });
     }
 
-    const template = fs.readFileSync(templatePath);
-    const zip = new PizZip(template);
-
-    const document = new Docxtemplater(zip, {
-      paragraphLoop: true,
-      linebreaks: true,
-      delimiters: {
-        start: '{{',
-        end: '}}',
-      },
-    });
-
-    document.render(data);
-
-    const output = document.getZip().generate({
-      type: 'nodebuffer',
-      compression: 'DEFLATE',
-    });
+    const compactData = pageCount === 2 ? fitCvContent(data) : data;
+    const renderData = pageCount === 2
+      ? {
+          ...compactData,
+          ENV1: experienceEnvironments.ENV1,
+          ENV2: experienceEnvironments.ENV2,
+        }
+      : compactData;
+    let output;
+    const isHtmlTemplate = path.extname(templatePath).toLowerCase() === '.html';
+    if (isHtmlTemplate) {
+      output = renderHtmlTemplate(templatePath, renderData);
+    } else {
+      const template = fs.readFileSync(templatePath);
+      const zip = new PizZip(template);
+      const document = new Docxtemplater(zip, {
+        paragraphLoop: true,
+        linebreaks: true,
+        delimiters: { start: '{{', end: '}}' },
+      });
+      document.render(renderData);
+      output = document.getZip().generate({
+        type: 'nodebuffer',
+        compression: 'DEFLATE',
+      });
+    }
 
     const requestedName =
       typeof request.body.filename === 'string'
@@ -147,7 +224,10 @@ function renderFromTemplate({
       : `${safeName.replace(/\.docx$/i, '')}.pdf`;
 
     temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'cv-render-'));
-    const docxPath = path.join(temporaryDirectory, 'cv.docx');
+    const docxPath = path.join(
+      temporaryDirectory,
+      isHtmlTemplate ? 'cv.html' : 'cv.docx',
+    );
 
     fs.writeFileSync(docxPath, output);
 
